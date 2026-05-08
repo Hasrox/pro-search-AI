@@ -1,8 +1,7 @@
 import httpx
 import asyncio
 import structlog
-from pydantic import BaseModel
-from typing import Type, List, Optional
+from typing import List, Optional
 
 logger = structlog.get_logger()
 
@@ -28,10 +27,14 @@ class LLMShim:
                 resp.raise_for_status()
                 data = resp.json()
                 return data["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                error_body = e.response.text if e.response else str(e)
+                logger.warning("LLM HTTP error", attempt=attempt, status=e.response.status_code, body=error_body)
+                await asyncio.sleep(2 ** attempt)
             except Exception as e:
                 logger.warning("LLM retry", attempt=attempt, error=str(e))
                 await asyncio.sleep(2 ** attempt)
-        raise RuntimeError("LLM invoke failed after retries")
+        raise RuntimeError(f"LLM invoke failed after retries (last error: {error_body if 'error_body' in locals() else str(e)})")
 
     async def close(self):
         await self.client.aclose()
