@@ -32,3 +32,6 @@ class LLMShim:
                 logger.warning("LLM retry", attempt=attempt, error=str(e))
                 await asyncio.sleep(2 ** attempt)
         raise RuntimeError("LLM invoke failed after retries")
+
+    async def close(self):
+        await self.client.aclose()
