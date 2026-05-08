@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime
 import structlog
 from app.shims.llm_shim import LLMShim
@@ -16,14 +17,22 @@ class ResearchPipeline:
     async def run(self, query: str) -> str:
         logger.info("Starting research pipeline", query=query)
 
-        # 1. Generate 8-12 powerful queries (structured JSON)
+        # 1. Generate 8-12 powerful queries (structured JSON) with retry fallback
         q_prompt = f"""Generate 8-12 advanced search queries for: {query}
-Return ONLY a JSON array of strings. Use operators, date ranges, site:, -exclude, etc."""
+Return ONLY a valid JSON array of strings. Use operators, date ranges, site:, -exclude, etc."""
         raw_queries = await self.llm.invoke(q_prompt, json_mode=True, temperature=0.2)
-        import json
-        queries = json.loads(raw_queries)
+        
+        try:
+            # Gemma sometimes adds extra text → strip and parse safely
+            cleaned = raw_queries.strip().strip("```json").strip("```")
+            queries = json.loads(cleaned)
+            if not isinstance(queries, list):
+                raise ValueError("Not a list")
+        except Exception as e:
+            logger.warning("JSON parse failed, falling back to simple split", error=str(e))
+            queries = [q.strip() for q in raw_queries.split("\n") if q.strip()][:12]
 
-        # 2. Parallel search
+        # 2. Parallel search (max 8 concurrent)
         results = await self.search.search_parallel(queries)
 
         # 3. Synthesize report
@@ -33,7 +42,7 @@ Return ONLY a JSON array of strings. Use operators, date ranges, site:, -exclude
 Context:
 {context}
 
-Use natural Markdown. Cite sources by URL inline."""
+Use natural Markdown. Cite sources by URL inline. Be factual and cite every claim."""
         report_md = await self.llm.invoke(synth_prompt, temperature=0.4)
 
         # 4. Save
@@ -45,5 +54,5 @@ Use natural Markdown. Cite sources by URL inline."""
         )
         await save_research(run)
 
-        logger.info("Research complete", sources=len(results))
+        logger.info("Research complete", sources=len(results), run_id=run.id)
         return report_md
