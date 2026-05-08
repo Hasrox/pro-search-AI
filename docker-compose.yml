@@ -1,0 +1,95 @@
+services:
+  pro-ollama:
+    image: ollama/ollama:latest
+    container_name: pro-ollama
+    volumes:
+      - ./ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    
+    # === GPU Acceleration for RTX 4080 ===
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Just serve - model is already in ./ollama_data
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "=== Starting Ollama serve only (model already in ollama_data) ==="
+        ollama serve
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  pro-open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: pro-open-webui
+    volumes:
+      - ./open-webui:/app/backend/data
+    ports:
+      - "3000:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://pro-ollama:11434
+    depends_on:
+      pro-ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  pro-qdrant:
+    image: qdrant/qdrant:latest
+    container_name: pro-qdrant
+    volumes:
+      - ./qdrant:/qdrant/storage
+    ports:
+      - "6333:6333"
+    restart: unless-stopped
+
+  pro-searxng:
+    image: searxng/searxng:latest
+    container_name: pro-searxng
+    volumes:
+      - ./searxng:/etc/searxng
+    ports:
+      - "8081:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081/
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 120s
+
+    # === FIX for settings.yml "is a directory" error ===
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "=== SearXNG startup fix ==="
+        if [ -d "/etc/searxng/settings.yml" ]; then
+          echo "Removing corrupted settings.yml directory..."
+          rm -rf /etc/searxng/settings.yml
+        fi
+        exec /usr/local/searxng/entrypoint.sh
+
+networks:
+  default:
+    name: pro-search-pipeline_pro-net
+    driver: bridge
