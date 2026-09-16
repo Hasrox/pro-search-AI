@@ -1,8 +1,25 @@
 #Requires -Version 5.1
-# Fresh Windows 11 bootstrap installer.
-# Save this file as ANSI / UTF-8. Run in an elevated PowerShell window:
-#   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-#   .\Install-FreshWin11Apps.ps1
+<#
+.SYNOPSIS
+    Fresh Windows 11 bootstrap installer.
+
+.DESCRIPTION
+    Installs runtimes, game launchers, Chrome, NVIDIA App, and FanControl.
+    Prefers winget; falls back to vendor download + silent install.
+    Skips packages that are already detected. Writes TXT + HTML reports
+    to the Desktop by default.
+
+.NOTES
+    Save this file as UTF-8.
+    Run in an elevated PowerShell window:
+
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+        .\Install-FreshWin11Apps.ps1
+
+    WhatIf is supported:
+
+        .\Install-FreshWin11Apps.ps1 -WhatIf
+#>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [switch]$SkipInstalled = $true,
@@ -48,6 +65,7 @@ function Write-Log {
         [ValidateSet('INFO', 'WARN', 'ERROR', 'OK', 'STEP')]
         [string]$Level = 'INFO'
     )
+
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line  = '[{0}] [{1,-5}] {2}' -f $stamp, $Level, $Message
     Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8
@@ -95,6 +113,7 @@ function Update-WingetSources {
         Write-Log 'winget not found. Installers will use direct downloads only.' 'WARN'
         return $false
     }
+
     try {
         Write-Log 'Refreshing winget sources...'
         cmd /c 'winget source update --disable-interactivity >nul 2>&1'
@@ -108,7 +127,9 @@ function Update-WingetSources {
 
 function Test-WingetPackageInstalled {
     param([Parameter(Mandatory)][string]$Id)
+
     if (-not (Test-WingetAvailable)) { return $false }
+
     $output = cmd /c "winget list --id $Id --exact --accept-source-agreements --disable-interactivity 2>nul"
     if (-not $output) { return $false }
     return (($output -join "`n") -match [regex]::Escape($Id))
@@ -116,14 +137,18 @@ function Test-WingetPackageInstalled {
 
 function Test-AppInstalledByName {
     param([string[]]$NamePatterns)
+
     $uninstallKeys = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall*'
     )
+
+    # Safely skip uninstall keys that have no DisplayName (StrictMode-safe).
     $displayNames = Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName } |
+        Where-Object { $null -ne $_.PSObject.Properties['DisplayName'] } |
         Select-Object -ExpandProperty DisplayName
+
     foreach ($pattern in $NamePatterns) {
         if ($displayNames | Where-Object { $_ -like $pattern }) { return $true }
     }
@@ -138,6 +163,7 @@ function Show-InstallProgress {
         [ValidateSet('Checking', 'Installing', 'Downloading', 'Skipped', 'Succeeded', 'Failed')]
         [string]$State
     )
+
     $percent = 0
     if ($Total -gt 0) { $percent = [int](($Index / $Total) * 100) }
     $activity = 'Fresh Windows 11 installer  [{0}/{1}]' -f $Index, $Total
@@ -150,12 +176,15 @@ function Invoke-WingetInstall {
     param(
         [Parameter(Mandatory)][string]$Id
     )
+
     Write-Log ('winget install --id {0} --exact --scope machine' -f $Id)
     $cmdLine = 'winget install --id {0} --exact --accept-package-agreements --accept-source-agreements --disable-interactivity --scope machine' -f $Id
     cmd /c $cmdLine
     $code = $LASTEXITCODE
-    # 0 = success; -1978335189 often means already installed
+
+    # 0 = success; -1978335189 (0x8A15002B) often means already installed
     if ($code -eq 0 -or $code -eq -1978335189) { return $true }
+
     Write-Log ('winget exit code {0} for {1}' -f $code, $Id) 'WARN'
     return $false
 }
@@ -165,6 +194,7 @@ function Get-RemoteFile {
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$OutFile
     )
+
     Write-Log ('Downloading {0}' -f $Url)
     try {
         $headers = @{ 'User-Agent' = 'Mozilla/5.0 Win11FreshInstall/1.0' }
@@ -183,8 +213,10 @@ function Invoke-VendorInstaller {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Arguments
     )
+
     if (-not (Test-Path $Path)) { throw ('Installer not found: {0}' -f $Path) }
     Write-Log ('Launching installer: {0} {1}' -f $Path, $Arguments)
+
     $isMsi = [IO.Path]::GetExtension($Path) -eq '.msi'
     if ($isMsi) {
         $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', ('"{0}"' -f $Path), $Arguments) -Wait -PassThru
@@ -192,6 +224,7 @@ function Invoke-VendorInstaller {
     else {
         $proc = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
     }
+
     if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010 -or $proc.ExitCode -eq 1641) { return $true }
     Write-Log ('Installer exit code {0}' -f $proc.ExitCode) 'WARN'
     return $false
@@ -205,6 +238,7 @@ function Add-Result {
         [string]$Status,
         [string]$Detail = ''
     )
+
     $item = New-Object psobject -Property @{
         Name     = $Name
         Method   = $Method
@@ -221,6 +255,7 @@ function Install-Package {
         [Parameter(Mandatory)][int]$Index,
         [Parameter(Mandatory)][int]$Total
     )
+
     $name = $Package.Name
     Show-InstallProgress -Name $name -Index $Index -Total $Total -State Checking
 
@@ -261,8 +296,9 @@ function Install-Package {
             Show-InstallProgress -Name $name -Index $Index -Total $Total -State Downloading
             $ext = '.exe'
             if ($Package.Url -match '\.msi(\?|$)') { $ext = '.msi' }
-            $safeName = ($name -replace '[^\w\.-]', '_')
+            $safeName = ($name -replace '[^\w.-]', '')
             $dest = Join-Path $Script:DownloadDir ($safeName + $ext)
+
             if (Get-RemoteFile -Url $Package.Url -OutFile $dest) {
                 Show-InstallProgress -Name $name -Index $Index -Total $Total -State Installing
                 $args = $Script:SilentArgs.GenericExe
@@ -310,14 +346,13 @@ function Write-FinalReport {
     New-Item -ItemType Directory -Force -Path $ReportDirectory | Out-Null
     $txtPath  = Join-Path $ReportDirectory ('Win11-Install-Report-{0}.txt' -f $stamp)
     $htmlPath = Join-Path $ReportDirectory ('Win11-Install-Report-{0}.html' -f $stamp)
-
     $mins = [int]$duration.TotalMinutes
     $secs = $duration.Seconds
 
     $summaryLines = New-Object System.Collections.Generic.List[string]
-    [void]$summaryLines.Add('============================================================')
+    [void]$summaryLines.Add('')
     [void]$summaryLines.Add(' Windows 11 Fresh Install Report')
-    [void]$summaryLines.Add('============================================================')
+    [void]$summaryLines.Add('')
     [void]$summaryLines.Add((' Computer : {0}' -f $env:COMPUTERNAME))
     [void]$summaryLines.Add((' User     : {0}' -f $env:USERNAME))
     [void]$summaryLines.Add((' Started  : {0}' -f $Script:StartTime.ToString('yyyy-MM-dd HH:mm:ss')))
@@ -329,7 +364,6 @@ function Write-FinalReport {
     [void]$summaryLines.Add((' Skipped   : {0}' -f $skip))
     [void]$summaryLines.Add((' Failed    : {0}' -f $fail))
     [void]$summaryLines.Add('------------------------------------------------------------')
-
     foreach ($r in $Script:Results) {
         $line = '{0,-36} {1,-10} {2,-28} {3}' -f $r.Name, $r.Status, $r.Method, $r.Detail
         [void]$summaryLines.Add($line)
@@ -355,9 +389,8 @@ function Write-FinalReport {
     [void]$sb.AppendLine('th{background:#334155}')
     [void]$sb.AppendLine('</style></head><body>')
     [void]$sb.AppendLine('<h1>Windows 11 Fresh Install Report</h1>')
-    [void]$sb.AppendLine(('<div class="meta">{0} | {1} | {2} to {3} ({4}m {5}s)</div>' -f `
-        $env:COMPUTERNAME, $env:USERNAME, `
-        $Script:StartTime.ToString('yyyy-MM-dd HH:mm:ss'), `
+    [void]$sb.AppendLine(('<div class="meta">{0} | {1} | {2} to {3} ({4}m {5}s)</div>' -f $env:COMPUTERNAME, $env:USERNAME,
+        $Script:StartTime.ToString('yyyy-MM-dd HH:mm:ss'),
         $end.ToString('yyyy-MM-dd HH:mm:ss'), $mins, $secs))
     [void]$sb.AppendLine('<div class="cards">')
     [void]$sb.AppendLine(('<div class="card"><span>Succeeded</span><b style="color:#4ade80">{0}</b></div>' -f $ok))
@@ -365,17 +398,20 @@ function Write-FinalReport {
     [void]$sb.AppendLine(('<div class="card"><span>Failed</span><b style="color:#f87171">{0}</b></div>' -f $fail))
     [void]$sb.AppendLine('</div>')
     [void]$sb.AppendLine('<table><thead><tr><th>Package</th><th>Status</th><th>Method</th><th>Detail</th></tr></thead><tbody>')
+
     foreach ($r in $Script:Results) {
         $color = '#991b1b'
         $bg    = '#fee2e2'
         if ($r.Status -eq 'Succeeded') { $color = '#166534'; $bg = '#dcfce7' }
         elseif ($r.Status -eq 'Skipped') { $color = '#854d0e'; $bg = '#fef9c3' }
+
         $n = [System.Net.WebUtility]::HtmlEncode([string]$r.Name)
         $m = [System.Net.WebUtility]::HtmlEncode([string]$r.Method)
         $d = [System.Net.WebUtility]::HtmlEncode([string]$r.Detail)
         $row = '<tr><td>{0}</td><td style="background:{1};color:{2};font-weight:600">{3}</td><td>{4}</td><td>{5}</td></tr>' -f $n, $bg, $color, $r.Status, $m, $d
         [void]$sb.AppendLine($row)
     }
+
     [void]$sb.AppendLine('</tbody></table>')
     [void]$sb.AppendLine(('<p class="meta">Full log: {0}</p>' -f [System.Net.WebUtility]::HtmlEncode($Script:LogFile)))
     [void]$sb.AppendLine('</body></html>')
@@ -398,58 +434,55 @@ function Write-FinalReport {
 
 function Get-PackageCatalog {
     $list = @()
+
     $list += @{ Group = 'Runtimes'; Name = 'DirectX End-User Runtime'; WingetId = 'Microsoft.DirectX'; Detect = @('DirectX*') }
     $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2005 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2005.x86'; Detect = @('Microsoft Visual C++ 2005 Redistributable*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2005 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2005.x64'; Detect = @('Microsoft Visual C++ 2005 Redistributable (x64)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2008 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2008.x86'; Detect = @('Microsoft Visual C++ 2008 Redistributable*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2008 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2008.x64'; Detect = @('Microsoft Visual C++ 2008 Redistributable (x64)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2010 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2010.x86'; Detect = @('Microsoft Visual C++ 2010  x86 Redistributable*','Microsoft Visual C++ 2010 Redistributable (x86)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2010 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2010.x64'; Detect = @('Microsoft Visual C++ 2010  x64 Redistributable*','Microsoft Visual C++ 2010 Redistributable (x64)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2012 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2012.x86'; Detect = @('Microsoft Visual C++ 2012 Redistributable (x86)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2012 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2012.x64'; Detect = @('Microsoft Visual C++ 2012 Redistributable (x64)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2013 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2013.x86'; Detect = @('Microsoft Visual C++ 2013 Redistributable (x86)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2013 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2013.x64'; Detect = @('Microsoft Visual C++ 2013 Redistributable (x64)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2015-2026 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2015+.x86'; Detect = @('Microsoft Visual C++ 2015-2022 Redistributable (x86)*','Microsoft Visual C++ 2015-2026 Redistributable (x86)*') }
-    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2015-2026 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2015+.x64'; Detect = @('Microsoft Visual C++ 2015-2022 Redistributable (x64)*','Microsoft Visual C++ 2015-2026 Redistributable (x64)*') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2005 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2005.x64'; Detect = @('Microsoft Visual C++ 2005 Redistributable (x64)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2008 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2008.x86'; Detect = @('Microsoft Visual C++ 2008 Redistributable') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2008 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2008.x64'; Detect = @('Microsoft Visual C++ 2008 Redistributable (x64)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2010 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2010.x86'; Detect = @('Microsoft Visual C++ 2010  x86 Redistributable', 'Microsoft Visual C++ 2010 Redistributable (x86)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2010 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2010.x64'; Detect = @('Microsoft Visual C++ 2010  x64 Redistributable', 'Microsoft Visual C++ 2010 Redistributable (x64)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2012 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2012.x86'; Detect = @('Microsoft Visual C++ 2012 Redistributable (x86)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2012 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2012.x64'; Detect = @('Microsoft Visual C++ 2012 Redistributable (x64)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2013 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2013.x86'; Detect = @('Microsoft Visual C++ 2013 Redistributable (x86)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2013 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2013.x64'; Detect = @('Microsoft Visual C++ 2013 Redistributable (x64)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2015-2026 Redistributable (x86)'; WingetId = 'Microsoft.VCRedist.2015+.x86'; Detect = @('Microsoft Visual C++ 2015-2022 Redistributable (x86)', 'Microsoft Visual C++ 2015-2026 Redistributable (x86)') }
+    $list += @{ Group = 'Runtimes'; Name = 'Visual C++ 2015-2026 Redistributable (x64)'; WingetId = 'Microsoft.VCRedist.2015+.x64'; Detect = @('Microsoft Visual C++ 2015-2022 Redistributable (x64)', 'Microsoft Visual C++ 2015-2026 Redistributable (x64)') }
     $list += @{ Group = 'Runtimes'; Name = '.NET Desktop Runtime 6'; WingetId = 'Microsoft.DotNet.DesktopRuntime.6'; Detect = @('Microsoft Windows Desktop Runtime - 6*') }
     $list += @{ Group = 'Runtimes'; Name = '.NET Desktop Runtime 8'; WingetId = 'Microsoft.DotNet.DesktopRuntime.8'; Detect = @('Microsoft Windows Desktop Runtime - 8*') }
     $list += @{ Group = 'Runtimes'; Name = '.NET Desktop Runtime 9'; WingetId = 'Microsoft.DotNet.DesktopRuntime.9'; Detect = @('Microsoft Windows Desktop Runtime - 9*') }
     $list += @{ Group = 'Runtimes'; Name = '.NET Desktop Runtime 10'; WingetId = 'Microsoft.DotNet.DesktopRuntime.10'; Detect = @('Microsoft Windows Desktop Runtime - 10*') }
+
     $list += @{ Group = 'Launchers'; Name = 'Steam'; WingetId = 'Valve.Steam'; Url = $Script:FallbackUrls.Steam; SilentArgs = $Script:SilentArgs.Steam; Detect = @('Steam') }
-    $list += @{ Group = 'Launchers'; Name = 'Battle.net'; WingetId = 'Blizzard.BattleNet'; Url = $Script:FallbackUrls.BattleNet; SilentArgs = $Script:SilentArgs.BattleNet; Detect = @('Battle.net*','Blizzard App*') }
-    $list += @{ Group = 'Launchers'; Name = 'EA App (Origins successor)'; WingetId = 'ElectronicArts.EADesktop'; Url = $Script:FallbackUrls.EaApp; SilentArgs = $Script:SilentArgs.EaApp; Detect = @('EA app*','EA Desktop*','Origin') }
-    $list += @{ Group = 'Launchers'; Name = 'Ubisoft Connect'; WingetId = 'Ubisoft.Connect'; Url = $Script:FallbackUrls.Ubisoft; SilentArgs = $Script:SilentArgs.Ubisoft; Detect = @('Ubisoft Connect*','Uplay*') }
+    $list += @{ Group = 'Launchers'; Name = 'Battle.net'; WingetId = 'Blizzard.BattleNet'; Url = $Script:FallbackUrls.BattleNet; SilentArgs = $Script:SilentArgs.BattleNet; Detect = @('Battle.net*', 'Blizzard App*') }
+    $list += @{ Group = 'Launchers'; Name = 'EA App (Origins successor)'; WingetId = 'ElectronicArts.EADesktop'; Url = $Script:FallbackUrls.EaApp; SilentArgs = $Script:SilentArgs.EaApp; Detect = @('EA App*', 'EA Desktop*', 'Origin*') }
+    $list += @{ Group = 'Launchers'; Name = 'Ubisoft Connect'; WingetId = 'Ubisoft.Connect'; Url = $Script:FallbackUrls.Ubisoft; SilentArgs = $Script:SilentArgs.Ubisoft; Detect = @('Ubisoft Connect*', 'Uplay*') }
     $list += @{ Group = 'Launchers'; Name = 'Epic Games Launcher'; WingetId = 'EpicGames.EpicGamesLauncher'; Url = $Script:FallbackUrls.Epic; SilentArgs = $Script:SilentArgs.Epic; Detect = @('Epic Games Launcher*') }
-    $list += @{ Group = 'Utilities'; Name = 'NVIDIA App'; WingetId = 'Nvidia.App'; Url = $Script:FallbackUrls.NvidiaApp; SilentArgs = $Script:SilentArgs.NvidiaApp; Detect = @('NVIDIA App*','NVIDIA GeForce Experience*') }
-    $list += @{ Group = 'Utilities'; Name = 'Google Chrome'; WingetId = 'Google.Chrome'; Url = $Script:FallbackUrls.Chrome; SilentArgs = $Script:SilentArgs.Chrome; Detect = @('Google Chrome*') }
-    $list += @{ Group = 'Utilities'; Name = 'FanControl V277'; WingetId = 'Rem0o.FanControl'; Url = $Script:FallbackUrls.FanControl; SilentArgs = $Script:SilentArgs.FanControl; Detect = @('FanControl*') }
+
+    $list += @{ Group = 'Apps'; Name = 'Google Chrome'; WingetId = 'Google.Chrome'; Url = $Script:FallbackUrls.Chrome; SilentArgs = $Script:SilentArgs.Chrome; Detect = @('Google Chrome') }
+    $list += @{ Group = 'Apps'; Name = 'NVIDIA App'; WingetId = 'Nvidia.NVIDIAApp'; Url = $Script:FallbackUrls.NvidiaApp; SilentArgs = $Script:SilentArgs.NvidiaApp; Detect = @('NVIDIA App*', 'NVIDIA GeForce Experience*') }
+    $list += @{ Group = 'Apps'; Name = 'FanControl'; WingetId = 'Rem0o.FanControl'; Url = $Script:FallbackUrls.FanControl; SilentArgs = $Script:SilentArgs.FanControl; Detect = @('FanControl*', 'Fan Control*') }
+
     return $list
 }
 
-Assert-Administrator
-Initialize-Workspace
-Update-WingetSources | Out-Null
+function Invoke-FreshInstall {
+    Assert-Administrator
+    Initialize-Workspace
+    [void](Update-WingetSources)
 
-$catalog = @(Get-PackageCatalog)
-$total = $catalog.Count
+    $packages = @(Get-PackageCatalog)
+    $total = $packages.Count
+    Write-Log ('Installing {0} packages...' -f $total) 'STEP'
 
-Write-Log ('Planning {0} packages' -f $total)
-Write-Host ''
-Write-Host '  Fresh Windows 11 application bootstrap' -ForegroundColor Cyan
-Write-Host ('  {0} packages  |  skip already installed: {1}' -f $total, [bool]$SkipInstalled) -ForegroundColor DarkCyan
-Write-Host ''
-
-$i = 0
-foreach ($pkg in $catalog) {
-    $i++
-    try {
-        Install-Package -Package $pkg -Index $i -Total $total
+    $index = 0
+    foreach ($package in $packages) {
+        $index++
+        Install-Package -Package $package -Index $index -Total $total
     }
-    catch {
-        Write-Log ('Unhandled error installing {0}: {1}' -f $pkg.Name, $_.Exception.Message) 'ERROR'
-        Add-Result -Name $pkg.Name -Method 'Exception' -Status Failed -Detail $_.Exception.Message
-    }
+
+    return (Write-FinalReport)
 }
 
-$exitCode = Write-FinalReport
+$exitCode = Invoke-FreshInstall
 exit $exitCode
